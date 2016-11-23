@@ -39,8 +39,7 @@ export default Service.extend(Evented, {
     assert('must connect to a socket first', socket);
 
     const channel = socket.channel(name, params);
-    channel.join();
-    return channel;
+    return channel.join();
   }
 
 });
