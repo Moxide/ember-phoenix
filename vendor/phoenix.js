@@ -21,7 +21,7 @@ define('phoenix', ['exports'], function(exports) {
   // channels are multiplexed over the connection.
   // Connect to the server using the `Socket` class:
   //
-  //     let socket = new Socket("/ws", {params: {userToken: "123"}})
+  //     let socket = new Socket("/socket", {params: {userToken: "123"}})
   //     socket.connect()
   //
   // The `Socket` constructor takes the mount point of the socket,
@@ -133,9 +133,9 @@ define('phoenix', ['exports'], function(exports) {
   // based on the local state of metadata. By default, all presence
   // metadata is returned, but a `listBy` function can be supplied to
   // allow the client to select which metadata to use for a given presence.
-  // For example, you may have a user online from different devices with a
+  // For example, you may have a user online from different devices with
   // a metadata status of "online", but they have set themselves to "away"
-  // on another device. In this case, they app may choose to use the "away"
+  // on another device. In this case, the app may choose to use the "away"
   // status for what appears on the UI. The example below defines a `listBy`
   // function which prioritizes the first metadata which was registered for
   // each user. This could be the first tab they opened, or the first device
@@ -171,7 +171,7 @@ define('phoenix', ['exports'], function(exports) {
   //     }
   //     let presences = {} // client's initial empty presence state
   //     // receive initial presence data from server, sent after join
-  //     myChannel.on("presences", state => {
+  //     myChannel.on("presence_state", state => {
   //       presences = Presence.syncState(presences, state, onJoin, onLeave)
   //       displayUsers(Presence.list(presences))
   //     })
@@ -184,6 +184,7 @@ define('phoenix', ['exports'], function(exports) {
   var VSN = "1.0.0";
   var SOCKET_STATES = { connecting: 0, open: 1, closing: 2, closed: 3 };
   var DEFAULT_TIMEOUT = 10000;
+  var WS_CLOSE_NORMAL = 1000;
   var CHANNEL_STATES = {
     closed: "closed",
     errored: "errored",
@@ -591,12 +592,20 @@ define('phoenix', ['exports'], function(exports) {
 
     // Initializes the Socket
     //
-    // endPoint - The string WebSocket endpoint, ie, "ws://example.com/ws",
+    // endPoint - The string WebSocket endpoint, ie, "ws://example.com/socket",
     //                                               "wss://example.com"
-    //                                               "/ws" (inherited host & protocol)
+    //                                               "/socket" (inherited host & protocol)
     // opts - Optional configuration
     //   transport - The Websocket Transport, for example WebSocket or Phoenix.LongPoll.
     //               Defaults to WebSocket with automatic LongPoll fallback.
+    //   encode - The function to encode outgoing messages. Defaults to JSON:
+    //
+    //     (payload, callback) => callback(JSON.stringify(payload))
+    //
+    //   decode - The function to decode incoming messages. Defaults to JSON:
+    //
+    //     (payload, callback) => callback(JSON.parse(payload))
+    //
     //   timeout - The default timeout in milliseconds to trigger push timeouts.
     //             Defaults `DEFAULT_TIMEOUT`
     //   heartbeatIntervalMs - The millisec interval to send a heartbeat message
@@ -631,6 +640,15 @@ define('phoenix', ['exports'], function(exports) {
       this.ref = 0;
       this.timeout = opts.timeout || DEFAULT_TIMEOUT;
       this.transport = opts.transport || window.WebSocket || LongPoll;
+      this.defaultEncoder = (payload, callback) => callback(JSON.stringify(payload))
+      this.defaultDecoder = (payload, callback) => callback(JSON.parse(payload))
+      if(this.transport !== LongPoll){
+        this.encode = opts.encode || this.defaultEncoder
+        this.decode = opts.decode || this.defaultDecoder
+      } else {
+        this.encode = this.defaultEncoder
+        this.decode = this.defaultDecoder
+      }
       this.heartbeatIntervalMs = opts.heartbeatIntervalMs || 30000;
       this.reconnectAfterMs = opts.reconnectAfterMs || function (tries) {
           return [1000, 2000, 5000, 10000][tries - 1] || 10000;
@@ -639,6 +657,8 @@ define('phoenix', ['exports'], function(exports) {
       this.longpollerTimeout = opts.longpollerTimeout || 20000;
       this.params = opts.params || {};
       this.endPoint = endPoint + "/" + TRANSPORTS.websocket;
+      this.heartbeatTimer       = null;
+      this.pendingHeartbeatRef  = null;
       this.reconnectTimer = new Timer(function () {
         _this4.disconnect(function () {
           return _this4.connect();
@@ -836,7 +856,9 @@ define('phoenix', ['exports'], function(exports) {
         var ref = data.ref;
 
         var callback = function callback() {
-          return _this7.conn.send(JSON.stringify(data));
+          _this7.encode(data, result => {
+            _this7.conn.send(result)
+          })
         };
         this.log("push", topic + " " + event + " (" + ref + ")", payload);
         if (this.isConnected()) {
@@ -862,12 +884,16 @@ define('phoenix', ['exports'], function(exports) {
       }
     }, {
       key: "sendHeartbeat",
-      value: function sendHeartbeat() {
-        if (!this.isConnected()) {
+      value: function sendHeartbeat() {if(!this.isConnected()){ return; }
+        if(this.pendingHeartbeatRef){
+          this.pendingHeartbeatRef = null;
+          this.log("transport", "heartbeat timeout. Attempting to re-establish connection");
+          this.conn.close(WS_CLOSE_NORMAL, "hearbeat timeout");
           return;
         }
-        this.push({ topic: "phoenix", event: "heartbeat", payload: {}, ref: this.makeRef() });
-      }
+        this.pendingHeartbeatRef = this.makeRef();
+        this.push({topic: "phoenix", event: "heartbeat", payload: {}, ref: this.pendingHeartbeatRef});
+  }
     }, {
       key: "flushSendBuffer",
       value: function flushSendBuffer() {
@@ -881,21 +907,15 @@ define('phoenix', ['exports'], function(exports) {
     }, {
       key: "onConnMessage",
       value: function onConnMessage(rawMessage) {
-        var msg = JSON.parse(rawMessage.data);
-        var topic = msg.topic;
-        var event = msg.event;
-        var payload = msg.payload;
-        var ref = msg.ref;
+        this.decode(rawMessage.data, msg => {
+          let {topic, event, payload, ref} = msg
+          if(ref && ref === this.pendingHeartbeatRef){ this.pendingHeartbeatRef = null }
 
-        this.log("receive", (payload.status || "") + " " + topic + " " + event + " " + (ref && "(" + ref + ")" || ""), payload);
-        this.channels.filter(function (channel) {
-          return channel.isMember(topic);
-        }).forEach(function (channel) {
-          return channel.trigger(event, payload, ref);
-        });
-        this.stateChangeCallbacks.message.forEach(function (callback) {
-          return callback(msg);
-        });
+          this.log("receive", `${payload.status || ""} ${topic} ${event} ${ref && "(" + ref + ")" || ""}`, payload)
+          this.channels.filter( channel => channel.isMember(topic) )
+                       .forEach( channel => channel.trigger(event, payload, ref) )
+          this.stateChangeCallbacks.message.forEach( callback => callback(msg) )
+        })
       }
     }]);
 
@@ -993,7 +1013,7 @@ define('phoenix', ['exports'], function(exports) {
 
         Ajax.request("POST", this.endpointURL(), "application/json", body, this.timeout, this.onerror.bind(this, "timeout"), function (resp) {
           if (!resp || resp.status !== 200) {
-            _this9.onerror(status);
+            _this9.onerror(resp && resp.status);
             _this9.closeAndRetry();
           }
         });
@@ -1021,7 +1041,8 @@ define('phoenix', ['exports'], function(exports) {
           var req = new XDomainRequest(); // IE8, IE9
           this.xdomainRequest(req, method, endPoint, body, timeout, ontimeout, callback);
         } else {
-          var req = window.XMLHttpRequest ? new XMLHttpRequest() : // IE7+, Firefox, Chrome, Opera, Safari
+          var req = window.XMLHttpRequest ?
+            new window.XMLHttpRequest() : // IE7+, Firefox, Chrome, Opera, Safari
             new ActiveXObject("Microsoft.XMLHTTP"); // IE6, IE5
           this.xhrRequest(req, method, endPoint, accept, body, timeout, ontimeout, callback);
         }
@@ -1072,7 +1093,14 @@ define('phoenix', ['exports'], function(exports) {
     }, {
       key: "parseJSON",
       value: function parseJSON(resp) {
-        return resp && resp !== "" ? JSON.parse(resp) : null;
+        if(!resp || resp === ""){ return null }
+
+        try {
+          return JSON.parse(resp)
+        } catch(e) {
+          console && console.log("failed to parse JSON response", resp)
+          return null
+        }
       }
     }, {
       key: "serialize",
