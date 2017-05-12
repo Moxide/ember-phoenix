@@ -640,14 +640,14 @@ define('phoenix', ['exports'], function(exports) {
       this.ref = 0;
       this.timeout = opts.timeout || DEFAULT_TIMEOUT;
       this.transport = opts.transport || window.WebSocket || LongPoll;
-      this.defaultEncoder = (payload, callback) => callback(JSON.stringify(payload))
-      this.defaultDecoder = (payload, callback) => callback(JSON.parse(payload))
+      this.defaultEncoder = function (payload, callback) {return callback(JSON.stringify(payload));};
+      this.defaultDecoder = function (payload, callback) {return callback(JSON.parse(payload));};
       if(this.transport !== LongPoll){
-        this.encode = opts.encode || this.defaultEncoder
-        this.decode = opts.decode || this.defaultDecoder
+        this.encode = opts.encode || this.defaultEncoder;
+        this.decode = opts.decode || this.defaultDecoder;
       } else {
-        this.encode = this.defaultEncoder
-        this.decode = this.defaultDecoder
+        this.encode = this.defaultEncoder;
+        this.decode = this.defaultDecoder;
       }
       this.heartbeatIntervalMs = opts.heartbeatIntervalMs || 30000;
       this.reconnectAfterMs = opts.reconnectAfterMs || function (tries) {
@@ -657,8 +657,8 @@ define('phoenix', ['exports'], function(exports) {
       this.longpollerTimeout = opts.longpollerTimeout || 20000;
       this.params = opts.params || {};
       this.endPoint = endPoint + "/" + TRANSPORTS.websocket;
-      this.heartbeatTimer       = null;
-      this.pendingHeartbeatRef  = null;
+      this.heartbeatTimer = null;
+      this.pendingHeartbeatRef = null;
       this.reconnectTimer = new Timer(function () {
         _this4.disconnect(function () {
           return _this4.connect();
@@ -854,11 +854,13 @@ define('phoenix', ['exports'], function(exports) {
         var event = data.event;
         var payload = data.payload;
         var ref = data.ref;
-
+        /*var callback = function callback() {
+          return _this7.conn.send(_this7.encode(data, payload));
+        };*/
         var callback = function callback() {
-          _this7.encode(data, result => {
-            _this7.conn.send(result)
-          })
+          return _this7.encode(data, function(result) {
+            return _this7.conn.send(result);
+          });
         };
         this.log("push", topic + " " + event + " (" + ref + ")", payload);
         if (this.isConnected()) {
@@ -907,15 +909,20 @@ define('phoenix', ['exports'], function(exports) {
     }, {
       key: "onConnMessage",
       value: function onConnMessage(rawMessage) {
-        this.decode(rawMessage.data, msg => {
-          let {topic, event, payload, ref} = msg
-          if(ref && ref === this.pendingHeartbeatRef){ this.pendingHeartbeatRef = null }
+        var _this11 = this;
+        return this.decode(rawMessage.data, function(msg) {
+          var topic = msg.topic;
+          var event = msg.event;
+          var payload = msg.payload;
+          var ref = msg.ref;
+          if(ref && ref === _this11.pendingHeartbeatRef){ _this11.pendingHeartbeatRef = null; }
 
-          this.log("receive", `${payload.status || ""} ${topic} ${event} ${ref && "(" + ref + ")" || ""}`, payload)
-          this.channels.filter( channel => channel.isMember(topic) )
-                       .forEach( channel => channel.trigger(event, payload, ref) )
-          this.stateChangeCallbacks.message.forEach( callback => callback(msg) )
-        })
+          _this11.log("receive", topic + " " + event + " (" + ref + ")", payload);
+          //this.log("receive", `${payload.status || ""} ${topic} ${event} ${ref && "(" + ref + ")" || ""}`, payload);
+          _this11.channels.filter( function(channel) { return channel.isMember(topic);} )
+                       .forEach( function(channel) { return channel.trigger(event, payload, ref);} );
+          return _this11.stateChangeCallbacks.message.forEach( function(callback) { return callback(msg);} );
+        });
       }
     }]);
 
@@ -1093,13 +1100,13 @@ define('phoenix', ['exports'], function(exports) {
     }, {
       key: "parseJSON",
       value: function parseJSON(resp) {
-        if(!resp || resp === ""){ return null }
+        if(!resp || resp === ""){ return null; }
 
         try {
-          return JSON.parse(resp)
+          return JSON.parse(resp);
         } catch(e) {
-          console && console.log("failed to parse JSON response", resp)
-          return null
+          //console && console.log("failed to parse JSON response", resp);
+          return null;
         }
       }
     }, {
